@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: "1. Checkout — Obtener el código fuente"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: "2. Preparación — Configurar PHP"
         uses: shivammathur/setup-php@v2
@@ -56,7 +56,7 @@ jobs:
 
       - name: "5. Resultados — Publicar estado y revisar logs"
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: resultados-pipeline
           path: |

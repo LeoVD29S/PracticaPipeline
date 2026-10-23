@@ -6,6 +6,15 @@ use Database\Factories\CardFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
+/**
+ * @property int $id
+ * @property string $name
+ * @property string $rarity
+ * @property int $attack
+ * @property int $defense
+ * @property string $nfc_uid
+ * @property string|null $description
+ */
 class Card extends Model
 {
     /** @use HasFactory<CardFactory> */

@@ -11,11 +11,17 @@ class CardController extends Controller
 {
     public function index(): View
     {
+        /** @var \Illuminate\Database\Eloquent\Collection<int, Card> $cards */
         $cards = Card::query()->orderBy('name')->get();
+
+        $totalPower = 0;
+        foreach ($cards as $card) {
+            $totalPower += $card->powerScore();
+        }
 
         return view('cards.index', [
             'cards' => $cards,
-            'totalPower' => $cards->sum(fn (Card $card) => $card->powerScore()),
+            'totalPower' => $totalPower,
         ]);
     }
 

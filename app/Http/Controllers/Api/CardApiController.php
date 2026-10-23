@@ -12,19 +12,25 @@ class CardApiController extends Controller
 {
     public function index(): JsonResponse
     {
-        $cards = Card::query()->orderBy('name')->get()->map(fn (Card $card) => [
-            'id' => $card->id,
-            'name' => $card->name,
-            'rarity' => $card->rarity,
-            'attack' => $card->attack,
-            'defense' => $card->defense,
-            'power' => $card->powerScore(),
-            'nfc_uid' => $card->nfc_uid,
-        ]);
+        /** @var \Illuminate\Database\Eloquent\Collection<int, Card> $cards */
+        $cards = Card::query()->orderBy('name')->get();
+
+        $payload = [];
+        foreach ($cards as $card) {
+            $payload[] = [
+                'id' => $card->id,
+                'name' => $card->name,
+                'rarity' => $card->rarity,
+                'attack' => $card->attack,
+                'defense' => $card->defense,
+                'power' => $card->powerScore(),
+                'nfc_uid' => $card->nfc_uid,
+            ];
+        }
 
         return response()->json([
-            'data' => $cards,
-            'count' => $cards->count(),
+            'data' => $payload,
+            'count' => count($payload),
         ]);
     }
 
@@ -54,6 +60,7 @@ class CardApiController extends Controller
             'card_ids.*' => ['integer', 'exists:cards,id'],
         ]);
 
+        /** @var \Illuminate\Database\Eloquent\Collection<int, Card> $cards */
         $cards = Card::query()->whereIn('id', $payload['card_ids'])->get();
         $result = $rules->validate($cards);
 

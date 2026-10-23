@@ -1,5 +1,7 @@
 # Arkana Cards — CI Pipeline
 
+Repositorio: https://github.com/LeoVD29S/PracticaPipeline
+
 Módulo web en **Laravel 12 / PHP 8.2** para el catálogo digital de cartas del proyecto **Arkana**. Este repositorio resuelve la Actividad 08 (selección de pruebas y herramientas) y la Actividad 09 (diseño y configuración del CI Pipeline).
 
 Alumno: **Villaseñor Dorantes, Leonardo** · Grupo **IDGS 102** · UTVT
