@@ -1,0 +1,65 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pipeline:
+    name: Checkout · Preparación · Build · Test · Resultados
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: "1. Checkout — Obtener el código fuente"
+        uses: actions/checkout@v4
+
+      - name: "2. Preparación — Configurar PHP"
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          extensions: mbstring, pdo_sqlite, sqlite3, bcmath, fileinfo
+          coverage: none
+          tools: composer:v2
+
+      - name: "2. Preparación — Instalar dependencias PHP"
+        run: composer update --prefer-dist --no-interaction --no-progress --with-all-dependencies
+
+      - name: "2. Preparación — Instalar dependencias npm"
+        run: npm install --no-fund --no-audit
+
+      - name: "3. Build — Construir o verificar la aplicación"
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          php artisan config:clear
+          npm run build
+
+      - name: "4. Test — Análisis estático (PHPStan)"
+        run: |
+          if [ ! -x vendor/bin/phpstan ]; then
+            composer require --dev phpstan/phpstan --no-interaction --no-progress
+          fi
+          vendor/bin/phpstan analyse --memory-limit=512M
+
+      - name: "4. Test — Ejecutar pruebas automatizadas"
+        env:
+          APP_ENV: testing
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+        run: php artisan test --log-junit storage/logs/junit.xml
+
+      - name: "5. Resultados — Publicar estado y revisar logs"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultados-pipeline
+          path: |
+            storage/logs/junit.xml
+            storage/logs/*.log
+          if-no-files-found: warn
