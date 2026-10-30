@@ -66,4 +66,13 @@ class DeckRulesTest extends TestCase
 
         $this->assertFalse($result['valid']);
     }
+
+    public function test_empty_deck_has_no_rule_violations(): void
+    {
+        $rules = new DeckRules;
+        $result = $rules->validate([]);
+
+        $this->assertTrue($result['valid']);
+        $this->assertSame([], $result['errors']);
+    }
 }

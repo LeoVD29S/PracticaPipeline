@@ -59,4 +59,18 @@ class CardApiTest extends TestCase
         $response->assertOk();
         $response->assertJsonPath('valid', true);
     }
+
+    public function test_api_rejects_a_card_without_nfc_uid(): void
+    {
+        $response = $this->postJson('/api/cards', [
+            'name' => 'Carta incompleta',
+            'rarity' => 'rare',
+            'attack' => 8,
+            'defense' => 8,
+        ]);
+
+        $response->assertStatus(422);
+        $response->assertJsonValidationErrors(['nfc_uid']);
+        $this->assertDatabaseCount('cards', 0);
+    }
 }

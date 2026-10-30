@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,11 +28,27 @@ jobs:
           coverage: none
           tools: composer:v2
 
+      - name: "2. Preparación — Cache de Composer"
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ runner.os }}-${{ hashFiles('composer.lock') }}
+          restore-keys: |
+            composer-${{ runner.os }}-
+
+      - name: "2. Preparación — Cache de npm"
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
       - name: "2. Preparación — Instalar dependencias PHP"
-        run: composer update --prefer-dist --no-interaction --no-progress --with-all-dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
 
       - name: "2. Preparación — Instalar dependencias npm"
-        run: npm install --no-fund --no-audit
+        run: npm ci --no-fund --no-audit
 
       - name: "3. Build — Construir o verificar la aplicación"
         run: |
@@ -41,25 +58,39 @@ jobs:
           npm run build
 
       - name: "4. Test — Análisis estático (PHPStan)"
+        id: phpstan
+        continue-on-error: true
         run: |
           if [ ! -x vendor/bin/phpstan ]; then
             composer require --dev phpstan/phpstan --no-interaction --no-progress
           fi
-          vendor/bin/phpstan analyse --memory-limit=512M
+          vendor/bin/phpstan analyse --memory-limit=512M --error-format=table
 
       - name: "4. Test — Ejecutar pruebas automatizadas"
+        id: tests
+        continue-on-error: true
         env:
           APP_ENV: testing
           DB_CONNECTION: sqlite
           DB_DATABASE: ":memory:"
-        run: php artisan test --log-junit storage/logs/junit.xml
+        run: |
+          mkdir -p storage/logs
+          php artisan test --log-junit storage/logs/junit.xml --testdox
 
-      - name: "5. Resultados — Publicar estado y revisar logs"
+      - name: "5. Resultados — Publicar métricas y quality gate"
+        if: always()
+        env:
+          PHPSTAN_OUTCOME: ${{ steps.phpstan.outcome }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+        run: php scripts/ci-metrics.php storage/logs/junit.xml
+
+      - name: "5. Resultados — Publicar artefactos"
         if: always()
         uses: actions/upload-artifact@v5
         with:
           name: resultados-pipeline
           path: |
             storage/logs/junit.xml
+            storage/logs/metrics.json
             storage/logs/*.log
           if-no-files-found: warn
