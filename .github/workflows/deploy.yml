@@ -1,0 +1,243 @@
+name: CD Deploy
+
+# Actividad 13 — Despliegue automatizado a un ambiente de pruebas autorizado.
+# Toma el artefacto que publicó "CD Release" (Actividad 12), lo verifica, lo transfiere
+# por SSH al servidor de pruebas, lo activa y comprueba disponibilidad y métricas.
+#
+# Servidor de destino:
+#  - Si existen los secretos DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY / DEPLOY_KNOWN_HOSTS
+#    se despliega a ese servidor real de pruebas.
+#  - Si no, se levanta un servidor de pruebas efímero (deploy/server/Dockerfile:
+#    Nginx + PHP-FPM 8.2 + OpenSSH) y se conecta a él por SSH con una llave temporal.
+
+on:
+  workflow_run:
+    workflows: ["CD Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión liberada a desplegar (tag de CD Release)"
+        required: true
+        default: "v1.0.2"
+      version_anterior:
+        description: "Versión instalada antes en el servidor efímero (vacío = servidor limpio)"
+        required: false
+        default: "v1.0.1"
+      simular_falla:
+        description: "Simular una falla de verificación para probar la reversión"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: deploy-pruebas
+  cancel-in-progress: false
+
+env:
+  APP_URL: http://127.0.0.1:8081
+
+jobs:
+  # ------------------------------------------------------------------
+  # Verificaciones previas y criterios de autorización
+  # ------------------------------------------------------------------
+  predeploy:
+    name: "Pre-despliegue · Recuperar y verificar artefacto"
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      run_id: ${{ steps.resolve.outputs.run_id }}
+      prev_version: ${{ steps.resolve.outputs.prev_version }}
+      prev_run_id: ${{ steps.resolve.outputs.prev_run_id }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: "Resolver versión y ejecución de CD Release"
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          find_run() {
+            gh run list -R "$GITHUB_REPOSITORY" -w release.yml --branch "$1" --status success -L 1 \
+              --json databaseId --jq '.[0].databaseId // empty'
+          }
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            V="${{ github.event.workflow_run.head_branch }}"
+            RID="${{ github.event.workflow_run.id }}"
+            PV=""
+          else
+            V="${{ github.event.inputs.version }}"
+            RID="$(find_run "$V")"
+            PV="${{ github.event.inputs.version_anterior }}"
+          fi
+          echo "$V" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::$V no es una versión liberada (SemVer sin sufijo)"; exit 1; }
+          [ -n "$RID" ] || { echo "::error::No hay una ejecución exitosa de CD Release para $V"; exit 1; }
+          git ls-remote --exit-code --tags origin "refs/tags/$V" >/dev/null || { echo "::error::El tag $V no existe"; exit 1; }
+          PRID=""
+          if [ -n "$PV" ]; then PRID="$(find_run "$PV")"; fi
+          {
+            echo "version=$V"; echo "run_id=$RID"; echo "prev_version=$PV"; echo "prev_run_id=$PRID"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Autorización de la liberación"
+            echo "| Criterio | Resultado |"
+            echo "| --- | --- |"
+            echo "| Versión SemVer liberada | \`$V\` |"
+            echo "| Tag existe en el repositorio | ✅ |"
+            echo "| CD Release exitoso (CI + validación + preproducción) | ✅ run $RID |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "1. Recuperar el artefacto generado en la actividad anterior"
+        uses: actions/download-artifact@v5
+        with:
+          name: arkana-cards-${{ steps.resolve.outputs.version }}
+          run-id: ${{ steps.resolve.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: artifact
+
+      - name: "Verificar integridad y contenido antes de desplegar"
+        run: |
+          cd artifact && sha256sum -c "arkana-cards-${{ steps.resolve.outputs.version }}.tar.gz.sha256" && cd ..
+          bash scripts/validate-artifact.sh "artifact/arkana-cards-${{ steps.resolve.outputs.version }}.tar.gz"
+
+  # ------------------------------------------------------------------
+  # Despliegue por SSH al ambiente de pruebas
+  # ------------------------------------------------------------------
+  deploy:
+    name: "Despliegue · Servidor de pruebas (SSH)"
+    needs: predeploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: pruebas
+      url: ${{ env.APP_URL }}
+    env:
+      VERSION: ${{ needs.predeploy.outputs.version }}
+      PREV: ${{ needs.predeploy.outputs.prev_version }}
+      EPHEMERAL: ${{ secrets.DEPLOY_HOST == '' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: "1. Recuperar artefacto ${{ env.VERSION }}"
+        uses: actions/download-artifact@v5
+        with:
+          name: arkana-cards-${{ env.VERSION }}
+          run-id: ${{ needs.predeploy.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: artifact
+
+      - name: "Recuperar versión anterior ${{ env.PREV }} (estado previo del servidor)"
+        if: env.PREV != '' && needs.predeploy.outputs.prev_run_id != ''
+        uses: actions/download-artifact@v5
+        with:
+          name: arkana-cards-${{ env.PREV }}
+          run-id: ${{ needs.predeploy.outputs.prev_run_id }}
+          github-token: ${{ github.token }}
+          path: artifact
+
+      - name: "Levantar servidor de pruebas (Nginx + PHP-FPM 8.2 + SSH)"
+        if: env.EPHEMERAL == 'true'
+        run: |
+          ssh-keygen -t ed25519 -N "" -C "github-actions-deploy" -f "$RUNNER_TEMP/deploy_key" -q
+          docker build -q -t arkana-test-server deploy/server
+          docker run -d --name arkana-pruebas -p 2222:22 -p 8081:80 \
+            -v "$RUNNER_TEMP/deploy_key.pub:/authorized_keys:ro" arkana-test-server
+          for i in $(seq 1 30); do ssh-keyscan -p 2222 -t ed25519 127.0.0.1 2>/dev/null | grep -q ed25519 && break; sleep 1; done
+          echo "DEPLOY_HOST=127.0.0.1" >> "$GITHUB_ENV"
+          echo "DEPLOY_PORT=2222" >> "$GITHUB_ENV"
+          echo "DEPLOY_USER=deploy" >> "$GITHUB_ENV"
+
+      - name: "2. Conexión segura por SSH (llave + known_hosts estricto)"
+        env:
+          SECRET_HOST: ${{ secrets.DEPLOY_HOST }}
+          SECRET_USER: ${{ secrets.DEPLOY_USER }}
+          SECRET_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SECRET_KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          if [ "$EPHEMERAL" = "true" ]; then
+            cp "$RUNNER_TEMP/deploy_key" ~/.ssh/deploy_key
+            ssh-keyscan -p 2222 -t ed25519 127.0.0.1 > ~/.ssh/known_hosts 2>/dev/null
+          else
+            printf '%s\n' "$SECRET_KEY" > ~/.ssh/deploy_key
+            printf '%s\n' "$SECRET_KNOWN" > ~/.ssh/known_hosts
+            echo "DEPLOY_HOST=$SECRET_HOST" >> "$GITHUB_ENV"; echo "DEPLOY_PORT=22" >> "$GITHUB_ENV"; echo "DEPLOY_USER=$SECRET_USER" >> "$GITHUB_ENV"
+          fi
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          cat >> ~/.ssh/config <<EOF
+          Host pruebas
+            HostName ${DEPLOY_HOST:-$SECRET_HOST}
+            Port ${DEPLOY_PORT:-22}
+            User ${DEPLOY_USER:-$SECRET_USER}
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking yes
+            BatchMode yes
+          EOF
+          ssh pruebas 'echo "Conectado a $(hostname) como $(whoami) · $(php -r "echo PHP_VERSION;") · $(nginx -v 2>&1)"'
+
+      - name: "Estado previo: instalar ${{ env.PREV }}"
+        if: env.EPHEMERAL == 'true' && env.PREV != ''
+        run: |
+          scp -q "artifact/arkana-cards-${PREV}.tar.gz" deploy/deploy-remote.sh pruebas:/tmp/
+          ssh pruebas "APP_URL=$APP_URL bash /tmp/deploy-remote.sh /tmp/arkana-cards-${PREV}.tar.gz ${PREV}" | tail -n 4
+
+      - name: "3. Transferir archivos de la aplicación"
+        run: |
+          scp -q "artifact/arkana-cards-${VERSION}.tar.gz" "artifact/arkana-cards-${VERSION}.tar.gz.sha256" deploy/deploy-remote.sh pruebas:/tmp/
+          ssh pruebas "cd /tmp && sha256sum -c arkana-cards-${VERSION}.tar.gz.sha256"
+
+      - name: "4-9. Desplegar (dependencias, .env, migraciones, permisos, cachés, recarga, verificación)"
+        id: deploy
+        shell: bash
+        env:
+          APP_KEY_SECRET: ${{ secrets.TEST_APP_KEY }}
+          FORCE_FAIL: ${{ github.event.inputs.simular_falla == 'true' && '1' || '' }}
+        run: |
+          set -o pipefail
+          set +e
+          ssh pruebas "APP_URL=$APP_URL APP_KEY_SECRET='$APP_KEY_SECRET' FORCE_FAIL='$FORCE_FAIL' bash /tmp/deploy-remote.sh /tmp/arkana-cards-${VERSION}.tar.gz ${VERSION}" | tee deploy-log.txt
+          RC=$?
+          set -e
+          ACTIVE=$(ssh pruebas 'basename "$(readlink -f /var/www/arkana/current)"')
+          echo "active=$ACTIVE" >> "$GITHUB_OUTPUT"
+          if [ -n "$FORCE_FAIL" ]; then
+            UPC=$(curl -s -o /dev/null -w '%{http_code}' "$APP_URL/up")
+            {
+              echo "### Prueba de reversión"
+              echo "| Paso | Resultado |"
+              echo "| --- | --- |"
+              echo "| Despliegue de $VERSION con falla simulada | código $RC (esperado ≠ 0) |"
+              echo "| Versión activa tras la reversión | \`$ACTIVE\` (esperado \`$PREV\`) |"
+              echo "| GET /up después de revertir | $UPC |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            [ "$RC" -ne 0 ] && [ "$ACTIVE" = "$PREV" ] && [ "$UPC" = "200" ] && echo "Reversión comprobada" && exit 0
+            exit 1
+          fi
+          [ "$RC" -eq 0 ] && [ "$ACTIVE" = "$VERSION" ]
+
+      - name: "Validación posterior y métricas"
+        if: github.event.inputs.simular_falla != 'true'
+        run: bash deploy/post-deploy-check.sh "$APP_URL" "ssh pruebas" post-deploy
+
+      - name: "Registrar resultados de la liberación"
+        if: always()
+        run: |
+          mkdir -p post-deploy
+          cp deploy-log.txt post-deploy/ 2>/dev/null || true
+          ssh pruebas 'ls -1 /var/www/arkana/releases; ls -1 /var/www/arkana/backups; readlink /var/www/arkana/current' > post-deploy/servidor.txt 2>&1 || true
+          docker logs arkana-pruebas > post-deploy/contenedor.log 2>&1 || true
+          ssh pruebas 'sudo -n true 2>/dev/null; tail -n 50 /var/log/nginx/arkana_access.log 2>/dev/null' > post-deploy/nginx-access.log 2>&1 || true
+
+      - name: "Publicar reporte de despliegue"
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: deploy-report-${{ env.VERSION }}${{ github.event.inputs.simular_falla == 'true' && '-rollback' || '' }}
+          path: post-deploy/
+          retention-days: 14
+          if-no-files-found: warn
