@@ -2,7 +2,7 @@
 
 Repositorio: https://github.com/LeoVD29S/PracticaPipeline
 
-Módulo web en **Laravel 12 / PHP 8.2** para el catálogo digital de cartas del proyecto **Arkana**. Este repositorio resuelve la Actividad 08 (selección de pruebas), la Actividad 09 (diseño del CI Pipeline) y la Actividad 10 (seguimiento de métricas y mejora del pipeline).
+Módulo web en **Laravel 12 / PHP 8.2** para el catálogo digital de cartas del proyecto **Arkana**. Este repositorio resuelve la Actividad 08 (selección de pruebas), la Actividad 09 (diseño del CI Pipeline) la Actividad 10 (seguimiento de métricas y mejora del pipeline) y la Actividad 12 (liberación de artefactos en pruebas y preproducción).
 
 Alumno: **Villaseñor Dorantes, Leonardo** · Grupo **IDGS 102** · UTVT
 
@@ -100,3 +100,21 @@ Las capturas y reportes de las actividades 08, 09 y 10 están en `docs/` y `docs
 Ejecuciones de referencia:
 - Fallida (PHPStan): https://github.com/LeoVD29S/PracticaPipeline/actions/runs/40036513163
 - Exitosa (tras corrección): https://github.com/LeoVD29S/PracticaPipeline/actions/runs/40037283992
+
+## Entrega continua (Actividad 12)
+
+El workflow `.github/workflows/release.yml` se dispara al subir un tag SemVer (`v1.0.0`) o manualmente:
+
+1. **CI** — checkout, Composer, build de Vite, PHPStan y PHPUnit (si falla, no hay artefacto).
+2. **Build** — `composer install --no-dev`, `npm run build`, `scripts/build-release.sh` y `scripts/validate-artifact.sh`.
+3. **Publicación** — artefacto `arkana-cards-vX.Y.Z` (tar.gz + SHA-256 + lista de archivos, 7 días).
+4. **Preproducción** — environment `preproduccion`: descarga, verifica, instala con `deploy/install-preprod.sh` y ejecuta prueba de humo.
+
+```bash
+git tag -a v1.0.0 -m "Arkana Cards v1.0.0"
+git push origin v1.0.0
+gh run download --name arkana-cards-v1.0.0
+bash scripts/validate-artifact.sh arkana-cards-v1.0.0.tar.gz
+```
+
+Parámetros del ambiente: `docs/Actividad12_Ambiente_Preproduccion.md`.

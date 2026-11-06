@@ -1,0 +1,189 @@
+name: CD Release
+
+# Actividad 12 — Liberación de artefactos en pruebas y preproducción.
+# Reutiliza las etapas del CI (checkout, dependencias, pruebas) y agrega:
+# empaquetado de una versión liberable, publicación del artefacto,
+# validación del paquete y entrega a un ambiente de preproducción.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión a liberar (SemVer, ej. v1.0.1). Vacío = usa el archivo VERSION + número de ejecución"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PHP_VERSION: "8.2"
+  PHP_EXTENSIONS: mbstring, pdo_sqlite, sqlite3, bcmath, fileinfo, openssl, tokenizer, xml, ctype, curl
+
+jobs:
+  # ------------------------------------------------------------------
+  # Etapa 1-3: Checkout · Composer · Pruebas (quality gate obligatorio)
+  # ------------------------------------------------------------------
+  ci:
+    name: "CI · Checkout · Dependencias · Pruebas"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: "1. Obtener el código desde GitHub"
+        uses: actions/checkout@v5
+
+      - name: "Calcular versión (SemVer)"
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            V="${GITHUB_REF_NAME}"
+          else
+            V="v$(cat VERSION)-rc.${GITHUB_RUN_NUMBER}"
+          fi
+          if ! echo "$V" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::La versión '$V' no cumple SemVer (vMAYOR.MENOR.PARCHE)"
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "### Versión a liberar: \`$V\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Configurar PHP ${{ env.PHP_VERSION }}"
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          coverage: none
+          tools: composer:v2
+
+      - name: "Cache de Composer"
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ runner.os }}-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
+
+      - name: "2. Instalar dependencias mediante Composer"
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: "Instalar dependencias npm y compilar assets"
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+
+      - name: "3. Ejecutar pruebas automatizadas (PHPStan + PHPUnit)"
+        env:
+          APP_ENV: testing
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          vendor/bin/phpstan analyse --memory-limit=512M --no-progress
+          mkdir -p storage/logs
+          php artisan test --log-junit storage/logs/junit.xml
+          PHPSTAN_OUTCOME=success TESTS_OUTCOME=success php scripts/ci-metrics.php storage/logs/junit.xml
+
+  # ------------------------------------------------------------------
+  # Etapa 4-6: Preparar archivos · Empaquetar · Publicar artefacto
+  # ------------------------------------------------------------------
+  build-release:
+    name: "Build · Empaquetar versión liberable"
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.ci.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: "Configurar PHP ${{ env.PHP_VERSION }}"
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          coverage: none
+          tools: composer:v2
+
+      - name: "4. Preparar archivos — dependencias de producción (sin dev)"
+        run: composer install --no-dev --prefer-dist --optimize-autoloader --classmap-authoritative --no-interaction --no-progress
+
+      - name: "4. Preparar archivos — assets compilados (Vite)"
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+
+      - name: "5. Generar artefacto de liberación (tar.gz + SHA-256)"
+        run: bash scripts/build-release.sh "$VERSION" dist
+
+      - name: "Validar el paquete antes de publicarlo"
+        run: bash scripts/validate-artifact.sh "dist/arkana-cards-${VERSION}.tar.gz"
+
+      - name: "6. Publicar artefacto"
+        uses: actions/upload-artifact@v5
+        with:
+          name: arkana-cards-${{ env.VERSION }}
+          path: |
+            dist/arkana-cards-${{ env.VERSION }}.tar.gz
+            dist/arkana-cards-${{ env.VERSION }}.tar.gz.sha256
+            dist/arkana-cards-${{ env.VERSION }}.files.txt
+          retention-days: 7
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Etapa 7: Entrega al ambiente de preproducción
+  # ------------------------------------------------------------------
+  deploy-preprod:
+    name: "Entrega · Preproducción"
+    needs: [ci, build-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: preproduccion
+      url: http://127.0.0.1:8080/up
+    env:
+      VERSION: ${{ needs.ci.outputs.version }}
+    steps:
+      - name: "Descargar artefacto de la ejecución"
+        uses: actions/download-artifact@v5
+        with:
+          name: arkana-cards-${{ env.VERSION }}
+          path: incoming
+
+      - name: "Configurar servidor de preproducción (PHP ${{ env.PHP_VERSION }})"
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          coverage: none
+          tools: none
+
+      - name: "Verificar integridad (SHA-256)"
+        working-directory: incoming
+        run: sha256sum -c "arkana-cards-${VERSION}.tar.gz.sha256"
+
+      - name: "7. Instalar y preparar la versión en preproducción"
+        env:
+          PREPROD_APP_KEY: ${{ secrets.PREPROD_APP_KEY }}
+        run: |
+          tar -xzf "incoming/arkana-cards-${VERSION}.tar.gz" "arkana-cards-${VERSION}/deploy/install-preprod.sh" --strip-components=2
+          bash install-preprod.sh "incoming/arkana-cards-${VERSION}.tar.gz" "$RUNNER_TEMP/arkana" 8080 | tee preprod-report.txt
+
+      - name: "Publicar reporte de entrega"
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: preprod-report-${{ env.VERSION }}
+          path: preprod-report.txt
+          retention-days: 7
+          if-no-files-found: warn
