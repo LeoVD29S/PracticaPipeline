@@ -173,9 +173,11 @@ jobs:
         run: sha256sum -c "arkana-cards-${VERSION}.tar.gz.sha256"
 
       - name: "7. Instalar y preparar la versión en preproducción"
+        shell: bash
         env:
           PREPROD_APP_KEY: ${{ secrets.PREPROD_APP_KEY }}
         run: |
+          set -o pipefail
           tar -xzf "incoming/arkana-cards-${VERSION}.tar.gz" "arkana-cards-${VERSION}/deploy/install-preprod.sh" --strip-components=2
           bash install-preprod.sh "incoming/arkana-cards-${VERSION}.tar.gz" "$RUNNER_TEMP/arkana" 8080 | tee preprod-report.txt
 

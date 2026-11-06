@@ -78,7 +78,8 @@ ln -sfn "$RELEASE" "$BASE/current"
 ok "$(readlink "$BASE/current")"
 
 step "7. Prueba de humo en http://127.0.0.1:$PORT"
-php -S "127.0.0.1:$PORT" -t "$BASE/current/public" "$BASE/current/vendor/laravel/framework/src/Illuminate/Foundation/resources/server.php" \
+# server.php de Laravel toma getcwd() como raíz pública: se arranca dentro de public/
+( cd "$BASE/current/public" && exec php -S "127.0.0.1:$PORT" ../vendor/laravel/framework/src/Illuminate/Foundation/resources/server.php ) \
   > "$BASE/server.log" 2>&1 &
 PID=$!
 trap 'kill $PID 2>/dev/null || true' EXIT
