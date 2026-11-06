@@ -67,7 +67,7 @@ SQLITE=$(find "$APP" -path "$APP/vendor" -prune -o -type f -name '*.sqlite' -pri
 [ "$LOGS" -eq 0 ] && [ "$SQLITE" -eq 0 ]; check "Sin logs ni bases de datos locales" $? "logs=${LOGS}, sqlite=${SQLITE}"
 
 # 4. Búsqueda de credenciales en el código propio (vendor se excluye: son paquetes públicos)
-SECRETS=$(grep -rIlE 'APP_KEY=base64:|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|^DB_PASSWORD=[^[:space:]]+' \
+SECRETS=$(grep -rIlE 'APP_KEY=base64:[A-Za-z0-9+/=]{32,}|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|^DB_PASSWORD=[^[:space:]]+' \
   "$APP" --exclude-dir=vendor 2>/dev/null | sed "s#^$APP/##" | tr '\n' ' ' || true)
 SECRETS="${SECRETS% }"
 [ -z "$SECRETS" ]; check "Sin credenciales ni llaves en el paquete" $? "${SECRETS:-0 coincidencias}"
