@@ -45,6 +45,8 @@ AVAIL=$(awk "BEGIN{printf \"%.1f\", $UP*100/60}")
 
 # Carga controlada: 300 peticiones, 10 concurrentes, sobre 3 rutas (ambiente de pruebas, nunca producción).
 : > "$OUT/load.txt"
+( for _ in 1 2 3 4 5 6; do docker stats --no-stream --format '{{.CPUPerc}} {{.MemUsage}}' arkana-pruebas 2>/dev/null; done ) > "$OUT/stats.txt" &
+STATS_PID=$!
 seq 1 300 | xargs -P 10 -I{} sh -c '
   case $(( {} % 3 )) in 0) p=/ ;; 1) p=/cartas ;; *) p=/api/cards ;; esac
   curl -s -o /dev/null -w "%{http_code} %{time_total}\n" --max-time 10 "'"$URL"'$p"' >> "$OUT/load.txt"
@@ -57,10 +59,13 @@ RPS_START=$(date +%s%N)
 seq 1 100 | xargs -P 10 -I{} curl -s -o /dev/null "$URL/api/cards"
 RPS=$(awk "BEGIN{printf \"%.1f\", 100/(($(date +%s%N)-$RPS_START)/1e9)}")
 
-STATS=$(docker stats --no-stream --format '{{.CPUPerc}} {{.MemUsage}}' arkana-pruebas 2>/dev/null || echo "n/d n/d")
-CPU=$(echo "$STATS" | awk '{print $1}')
-MEM=$(echo "$STATS" | awk '{print $2}')
-ERRS_AFTER=$($SSH "cat /var/www/arkana/current/storage/logs/*.log 2>/dev/null | grep -cE '\.(ERROR|CRITICAL):'" 2>/dev/null || echo 0)
+wait "$STATS_PID" 2>/dev/null || true
+# CPU pico y memoria máxima muestreados durante la carga
+CPU=$(awk '{gsub("%","",$1); if($1>m)m=$1} END{printf "%.1f%% (pico en carga)", m}' "$OUT/stats.txt" 2>/dev/null)
+MEM=$(awk '{print $2}' "$OUT/stats.txt" | sort -h | tail -n1)
+[ -n "$MEM" ] || { CPU="n/d"; MEM="n/d"; }
+ERRS_AFTER=$($SSH "cat /var/www/arkana/current/storage/logs/*.log 2>/dev/null | grep -cE '\.(ERROR|CRITICAL):' || true" 2>/dev/null | tail -n1)
+ERRS_AFTER=${ERRS_AFTER:-0}
 
 cat > "$OUT/metrics.json" <<EOF
 {"disponibilidad_pct": $AVAIL, "sondeos_ok": $UP, "sondeos": 60,

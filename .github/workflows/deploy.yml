@@ -178,7 +178,7 @@ jobs:
             StrictHostKeyChecking yes
             BatchMode yes
           EOF
-          ssh pruebas 'echo "Conectado a $(hostname) como $(whoami) · $(php -r "echo PHP_VERSION;") · $(nginx -v 2>&1)"'
+          ssh pruebas 'echo "Conectado a $(hostname) como $(whoami) · $(php -r "echo PHP_VERSION;") · $(/usr/sbin/nginx -v 2>&1)"'
 
       - name: "Estado previo: instalar ${{ env.PREV }}"
         if: env.EPHEMERAL == 'true' && env.PREV != ''
